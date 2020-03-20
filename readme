@@ -1,0 +1,5 @@
+./comparison.py  --src="mongodb://user:password@10.xxx.xxx.161:28000/admin?slaveOk=true" --dest="mongodb://user:password@10.xx.xxx.163:28000/admin?slaveOk=true"  --excludeDbs=admin,local,mongoshake --excludeCollections=system.profile --comparisonMode=all 
+1、在阿里开源的工具做的优化 
+2、修改了核心对比算法，对比速度由原来的2个小时左右，提升到40s 左右。
+3、代码有些冗余的地方还没优化
+
