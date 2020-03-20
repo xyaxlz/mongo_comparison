@@ -10,6 +10,7 @@ import getopt
 import os, time, random
 from multiprocessing import Pool
 import os
+import json
 import threading
 from bson.objectid import ObjectId
 
@@ -112,11 +113,11 @@ def check(src, dst):
 
         for coll in srcColls:
             if coll in configure[EXCLUDE_COLLS]:
-                log_info("IGNR => ignore collection [%s]" % coll)
+                log_info("IGNR => db:[%s] ignore collection [%s]" % (db, coll))
                 continue
 
             if dstColls.count(coll) == 0:
-                log_error("DIFF => collection only in source [%s]" % (coll))
+                log_error("DIFF => db:[%s] collection only in source [%s]" % (db, coll))
                 return False
 
             srcColl = srcDb[coll]
@@ -126,19 +127,19 @@ def check(src, dst):
             print("srcColl.count(): " + str(srcColl.count()))
             print("totalRecordCount: " + str(totalRecordCount))
             if srcColl.count() != dstColl.count():
-                log_error("DIFF => collection [%s] record count not equals" % (coll))
+                log_error("DIFF => db:[%s] collection [%s] record count not equals src[%d] dst[%d]" % (db, coll,srcColl.count(),dstColl.count()))
                 #return False
             else:
-                log_info("EQUL => collection [%s] record count equals" % (coll))
+                log_info("EQUL => db:[%s] collection [%s] record count equals recs[%d]" % (db, coll,srcColl.count()))
 
             # comparison collection index number
             src_index_length = len(srcColl.index_information())
             dst_index_length = len(dstColl.index_information())
             if src_index_length != dst_index_length:
-                log_error("DIFF => collection [%s] index number not equals: src[%r], dst[%r]" % (coll, src_index_length, dst_index_length))
+                log_error("DIFF => db:[%s] collection [%s] index number not equals: src[%r], dst[%r]" % (db, coll, src_index_length, dst_index_length))
                 return False
             else:
-                log_info("EQUL => collection [%s] index number equals" % (coll))
+                log_info("EQUL => db:[%s] collection [%s] index number equals" % (db, coll))
 
             # check sample data
             #p.apply_async(data_comparison_process, args=(db, coll, configure[COMPARISION_MODE],))
@@ -173,18 +174,7 @@ def data_comparison_process(db, coll, mode):
     dstDb = dst.conn[db] 
     srcColl = srcDb[coll]
     dstColl = dstDb[coll]
-
-
-    if mode == "no":
-        return True
-    elif mode == "sample":
-        # srcColl.count() mus::t equals to dstColl.count()
-        count = configure[COMPARISION_COUNT] if configure[COMPARISION_COUNT] <= srcColl.count() else srcColl.count()
-    else: # all
-        count = srcColl.count()
-
-    if count == 0:
-        return True
+    diffIds = []
     
     
     totalRecord = srcColl.find().count()
@@ -194,6 +184,7 @@ def data_comparison_process(db, coll, mode):
     while totalPageNum >0:
         srcDocs = []
         dstDocs = []
+        diffDocIds = []
         for doc in srcColl.find({'_id':{'$gt':ObjectId(firstId)}}).sort('_id', 1).limit(pageSize):
             srcDocs.append(doc)
             lastId = str(doc['_id'])
@@ -201,43 +192,25 @@ def data_comparison_process(db, coll, mode):
             dstDocs.append(doc)
 
         if srcDocs != dstDocs:
-            log_error("db:%s coll:%s ObjectId:%s limit: %d record not equals " % (db, coll, firstId, pageSize))
+            log_error("db [%s] collection [%s] ObjectId [%s] limit: %d record not equals " % (db, coll, firstId, pageSize))
             srcTotal = len(srcDocs)
             dstTotal = len(dstDocs)
-            if srcTotal < dstTotal:
-                diff = dstTotal - srcTotal
-                i = 0
-                while i < srcTotal:
-                    if srcDocs[i] != dstDocs[i]:
-                        log_error("db:%s coll:%s   DIFF => src_record[%s], dst_record[%s]" % (db, coll, srcDocs[i], dstDocs[i]))
+            i = 0
+            while i < srcTotal:
+                if srcDocs[i] not in dstDocs:
+                    if srcColl.find_one(srcDocs[i]["_id"]) != dstColl.find_one(srcDocs[i]["_id"]):
+                        diffDocIds.append(srcDocs[i]["_id"])
+                        #log_error("db:%s coll:%s   DIFF => src_record[%s], dst_record[%s]" % (db, coll, srcDocs[i], dstDocs[i]))
                         #return False
-                    i += 1
-                startDiff = srcTotal
-                while startDiff < dstTotal:
-                    log_error("db:%s coll:%s   DIFF => src_record[%s], dst_record[%s]" % (db, coll, "None", dstDocs[startDiff]))
-                    startDiff += 1
-
-            elif srcTotal > dstTotal:
-                diff = srcTotal - dstTotal
-                i = 0
-                while i < dstTotal:
-                    if srcDocs[i] != dstDocs[i]:
-                        log_error("db:%s coll:%s   DIFF => src_record[%s], dst_record[%s]" % (db, coll, srcDocs[i], dstDocs[i]))
-                        #return False
-                    i += 1
-                startDiff = dstTotal
-                while startDiff < srcTotal:
-                    log_error("db:%s coll:%s   DIFF => src_record[%s], dst_record[%s]" % (db, coll, srcDocs[startDiff], "None"))
-                    startDiff += 1
-            else:
-                
-                i = 0
-                while i < srcTotal:
-                    if srcDocs[i] != dstDocs[i]:
-                        log_error("db:%s coll:%s   DIFF => src_record[%s], dst_record[%s]" % (db, coll, srcDocs[i], dstDocs[i]))
-                        #return False
-                    i += 1
-
+                i += 1
+            
+            print(diffDocIds)
+            for id in diffDocIds:
+                print(id) 
+                diffSrcDoc = srcColl.find_one(id)
+                diffDstDoc = dstColl.find_one(id)
+                if diffSrcDoc != diffDstDoc:
+                    log_error("db [%s] collection [%s]   DIFF => src_record[%s], dst_record[%s]" % (db, coll, diffSrcDoc, diffDstDoc))
 
 
    
