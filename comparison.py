@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-
 # -*- coding:utf-8 -*-  
 
 import pymongo
@@ -109,7 +108,7 @@ def check(src, dst):
         else:
             log_info("EQUL => database [%s] collections count equals" % (db))
 
-        #p = Pool(16)
+        p = Pool(16)
 
         for coll in srcColls:
             if coll in configure[EXCLUDE_COLLS]:
@@ -124,8 +123,8 @@ def check(src, dst):
             dstColl = dstDb[coll]
             # comparison collection records number
             totalRecordCount = totalRecordCount + srcColl.count()
-            print("srcColl.count(): " + str(srcColl.count()))
-            print("totalRecordCount: " + str(totalRecordCount))
+            #print("srcColl.count(): " + str(srcColl.count()))
+            #print("totalRecordCount: " + str(totalRecordCount))
             if srcColl.count() != dstColl.count():
                 log_error("DIFF => db:[%s] collection [%s] record count not equals src[%d] dst[%d]" % (db, coll,srcColl.count(),dstColl.count()))
                 #return False
@@ -142,11 +141,11 @@ def check(src, dst):
                 log_info("EQUL => db:[%s] collection [%s] index number equals" % (db, coll))
 
             # check sample data
-            #p.apply_async(data_comparison_process, args=(db, coll, configure[COMPARISION_MODE],))
-
+            p.apply_async(data_comparison_process, args=(db, coll, configure[COMPARISION_MODE],))
+            
             #p = threading.Thread(target=data_comparison_process, args=(db, coll, configure[COMPARISION_MODE],)) 
             #p.start()
-            data_comparison_process(db, coll, configure[COMPARISION_MODE])
+            #data_comparison_process(db, coll, configure[COMPARISION_MODE])
             '''
             if not data_comparison(srcColl, dstColl, configure[COMPARISION_MODE]):
                 log_error("DIFF => collection [%s] data comparison not equals" % (coll))
@@ -154,10 +153,10 @@ def check(src, dst):
             else:
                 log_info("EQUL => collection [%s] data data comparison exactly eauals" % (coll))
             '''
-        #p.close()
-        #p.join()
+        p.close()
+        p.join()
 
-        print("totalRecordCount: " + str(totalRecordCount))
+    print("totalRecordCount: " + str(totalRecordCount))
     return True
 
 
@@ -175,9 +174,21 @@ def data_comparison_process(db, coll, mode):
     srcColl = srcDb[coll]
     dstColl = dstDb[coll]
     diffIds = []
+    '''
+    先查询dst count 后查询 src count,一般情况下线删除操作比较
+    少，所以正常情况下src 的count 大于或者等于 dst count。
+
+    '''
+    dstRecCount = dstColl.find().count()
+    srcRecCount = srcColl.find().count()
     
+    #对比src 和dst count 取最大值,为分页总行数 
+    if srcRecCount >= dstRecCount:
+        totalRecord = srcRecCount
+    else:
+        totalRecord = dstRecCount
+        
     
-    totalRecord = srcColl.find().count()
     pageSize=10000
     totalPageNum = (totalRecord + pageSize - 1) / pageSize
     firstId = "000000000000000000000000"
@@ -185,35 +196,55 @@ def data_comparison_process(db, coll, mode):
         srcDocs = []
         dstDocs = []
         diffDocIds = []
-        for doc in srcColl.find({'_id':{'$gt':ObjectId(firstId)}}).sort('_id', 1).limit(pageSize):
-            srcDocs.append(doc)
-            lastId = str(doc['_id'])
+        
+        ##dst src 分片后把每行记录分表放到各自的list里。
         for doc in dstColl.find({'_id':{'$gt':ObjectId(firstId)}}).sort('_id', 1).limit(pageSize):
             dstDocs.append(doc)
-
+            #因为src 分页数量可能小于dst 的分页数量，所以这个把dst 的lastId先配置上，如果src 的lastId不为空
+            #再覆盖掉。
+            lastId = str(doc['_id'])
+        for doc in srcColl.find({'_id':{'$gt':ObjectId(firstId)}}).sort('_id', 1).limit(pageSize):
+            srcDocs.append(doc)
+            #以src 的lastId 为最终值
+            lastId = str(doc['_id'])
+        
+        '''
+        直接对比src 分片和dst 分片后的list数据是否相同，如果不相同选取两个list 
+        长度最大值作为总行数，一行一行对比数据，求出相互不在对方的数据。并且把
+        不匹配的数据id 放到diff
+        '''
         if srcDocs != dstDocs:
             log_error("db [%s] collection [%s] ObjectId [%s] limit: %d record not equals " % (db, coll, firstId, pageSize))
             srcTotal = len(srcDocs)
             dstTotal = len(dstDocs)
+
+            #查询src 的每行记录是否在dst 里
             i = 0
             while i < srcTotal:
                 if srcDocs[i] not in dstDocs:
                     if srcColl.find_one(srcDocs[i]["_id"]) != dstColl.find_one(srcDocs[i]["_id"]):
                         diffDocIds.append(srcDocs[i]["_id"])
-                        #log_error("db:%s coll:%s   DIFF => src_record[%s], dst_record[%s]" % (db, coll, srcDocs[i], dstDocs[i]))
                         #return False
                 i += 1
+            #查询dst 每行记录是否在src 里
+            j = 0
+            while j < dstTotal:
+                if dstDocs[j] not in srcDocs:
+                    if srcColl.find_one(dstDocs[j]["_id"]) != dstColl.find_one(dstDocs[j]["_id"]):
+                        diffDocIds.append(dstDocs[j]["_id"])
+                        #return False
+                j += 1
+
+
             
-            print(diffDocIds)
+            #再次对比不一致的数据
             for id in diffDocIds:
-                print(id) 
+                #print(id) 
                 diffSrcDoc = srcColl.find_one(id)
                 diffDstDoc = dstColl.find_one(id)
                 if diffSrcDoc != diffDstDoc:
                     log_error("db [%s] collection [%s]   DIFF => src_record[%s], dst_record[%s]" % (db, coll, diffSrcDoc, diffDstDoc))
 
-
-   
         firstId = lastId
         totalPageNum -= 1
     
@@ -267,7 +298,7 @@ if __name__ == "__main__":
         configure[COMPARISION_COUNT] = 10000
 
     # ignore databases
-    configure[EXCLUDE_DBS] += ["admin", "local","_mongodrc_","db1"]
+    configure[EXCLUDE_DBS] += ["admin", "local","_mongodrc_"]
     configure[EXCLUDE_COLLS] += ["system.profile"]
 
     # dump configuration
