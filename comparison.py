@@ -14,11 +14,10 @@ import threading
 from bson.objectid import ObjectId
 
 # constant
-COMPARISION_COUNT = "comparison_count"
-COMPARISION_MODE = "comparisonMode"
 EXCLUDE_DBS = "excludeDbs"
 EXCLUDE_COLLS = "excludeColls"
-SAMPLE = "sample"
+PARALLEL = "parallel"
+CHECK_NUM="checkNum"
 # we don't check collections and index here because sharding's collection(`db.stats`) is splitted.
 CheckList = {"objects": 1, "numExtents": 1, "ok": 1}
 configure = {}
@@ -107,8 +106,8 @@ def check(src, dst):
             return False
         else:
             log_info("EQUL => database [%s] collections count equals" % (db))
-
-        p = Pool(16)
+        
+        p = Pool(configure[PARALLEL])
 
         for coll in srcColls:
             if coll in configure[EXCLUDE_COLLS]:
@@ -123,13 +122,13 @@ def check(src, dst):
             dstColl = dstDb[coll]
             # comparison collection records number
             totalRecordCount = totalRecordCount + srcColl.count()
-            #print("srcColl.count(): " + str(srcColl.count()))
-            #print("totalRecordCount: " + str(totalRecordCount))
-            if srcColl.count() != dstColl.count():
-                log_error("DIFF => db:[%s] collection [%s] record count not equals src[%d] dst[%d]" % (db, coll,srcColl.count(),dstColl.count()))
+            dstCollCount = dstColl.count()
+            srcCollCount = srcColl.count()
+            if dstCollCount != srcCollCount:
+                log_error("DIFF => db:[%s] collection [%s] record count not equals src[%d] dst[%d]" % (db, coll,srcCollCount,dstCollCount))
                 #return False
             else:
-                log_info("EQUL => db:[%s] collection [%s] record count equals recs[%d]" % (db, coll,srcColl.count()))
+                log_info("EQUL => db:[%s] collection [%s] record count equals recs[%d]" % (db, coll,srcCollCount))
 
             # comparison collection index number
             src_index_length = len(srcColl.index_information())
@@ -141,18 +140,11 @@ def check(src, dst):
                 log_info("EQUL => db:[%s] collection [%s] index number equals" % (db, coll))
 
             # check sample data
-            p.apply_async(data_comparison_process, args=(db, coll, configure[COMPARISION_MODE],))
+            p.apply_async(data_comparison_process, args=(db, coll,))
             
-            #p = threading.Thread(target=data_comparison_process, args=(db, coll, configure[COMPARISION_MODE],)) 
+            #p = threading.Thread(target=data_comparison_process, args=(db, coll,)) 
             #p.start()
-            #data_comparison_process(db, coll, configure[COMPARISION_MODE])
-            '''
-            if not data_comparison(srcColl, dstColl, configure[COMPARISION_MODE]):
-                log_error("DIFF => collection [%s] data comparison not equals" % (coll))
-                return False
-            else:
-                log_info("EQUL => collection [%s] data data comparison exactly eauals" % (coll))
-            '''
+            #data_comparison_process(db, coll,)
         p.close()
         p.join()
 
@@ -164,7 +156,8 @@ def check(src, dst):
     check sample data. comparison every entry
 """
 
-def data_comparison_process(db, coll, mode):
+#def data_comparison_process(db, coll, mode):
+def data_comparison_process(db, coll):
 
     src, dst = MongoCluster(srcUrl), MongoCluster(dstUrl)
     src.connect()
@@ -188,25 +181,30 @@ def data_comparison_process(db, coll, mode):
     else:
         totalRecord = dstRecCount
         
-    
     pageSize=10000
     totalPageNum = (totalRecord + pageSize - 1) / pageSize
-    firstId = "000000000000000000000000"
+    lastId = "None"
+    where = {}
     while totalPageNum >0:
+        
         srcDocs = []
         dstDocs = []
         diffDocIds = []
+        if lastId != "None":
+            where["_id"]={'$gt':lastId}
         
         ##dst src 分片后把每行记录分表放到各自的list里。
-        for doc in dstColl.find({'_id':{'$gt':ObjectId(firstId)}}).sort('_id', 1).limit(pageSize):
+        for doc in dstColl.find(where).sort('_id', 1).limit(pageSize):
             dstDocs.append(doc)
             #因为src 分页数量可能小于dst 的分页数量，所以这个把dst 的lastId先配置上，如果src 的lastId不为空
             #再覆盖掉。
-            lastId = str(doc['_id'])
-        for doc in srcColl.find({'_id':{'$gt':ObjectId(firstId)}}).sort('_id', 1).limit(pageSize):
+            lastId = doc['_id']
+
+        for doc in srcColl.find(where).sort('_id', 1).limit(pageSize):
             srcDocs.append(doc)
+            #print(doc)
             #以src 的lastId 为最终值
-            lastId = str(doc['_id'])
+            lastId = doc['_id']
         
         '''
         直接对比src 分片和dst 分片后的list数据是否相同，如果不相同选取两个list 
@@ -214,7 +212,7 @@ def data_comparison_process(db, coll, mode):
         不匹配的数据id 放到diff
         '''
         if srcDocs != dstDocs:
-            log_error("db [%s] collection [%s] ObjectId [%s] limit: %d record not equals " % (db, coll, firstId, pageSize))
+            log_error("db [%s] collection [%s] ObjectId [%s] limit: %d record not equals " % (db, coll, str(lastId), pageSize))
             srcTotal = len(srcDocs)
             dstTotal = len(dstDocs)
 
@@ -236,16 +234,25 @@ def data_comparison_process(db, coll, mode):
                 j += 1
 
 
-            
-            #再次对比不一致的数据
-            for id in diffDocIds:
-                #print(id) 
+            checkNums = configure[CHECK_NUM]
+            h = 0
+            while h < checkNums:
+                checkDiffDocIds = []
+                for id in diffDocIds:
+                    diffSrcDoc = srcColl.find_one(id)
+                    diffDstDoc = dstColl.find_one(id)
+                    if diffSrcDoc != diffDstDoc:
+                        checkDiffDocIds.append(id)
+                h +=1
+
+            for id in checkDiffDocIds:
                 diffSrcDoc = srcColl.find_one(id)
                 diffDstDoc = dstColl.find_one(id)
                 if diffSrcDoc != diffDstDoc:
                     log_error("db [%s] collection [%s]   DIFF => src_record[%s], dst_record[%s]" % (db, coll, diffSrcDoc, diffDstDoc))
 
-        firstId = lastId
+
+
         totalPageNum -= 1
     
     return True
@@ -253,16 +260,16 @@ def data_comparison_process(db, coll, mode):
 
 def usage():
     print '|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|'
-    print "| Usage: ./comparison.py --src=localhost:27017/db? --dest=localhost:27018/db? --count=10000 (the sample number) --excludeDbs=admin,local --excludeCollections=system.profile --comparisonMode=sample/all/no (sample: comparison sample number, default; all: comparison all data; no: only comparison outline without data)  |"
+    print "| Usage: ./comparison.py --src=localhost:27017/db? --dest=localhost:27018/db?  --excludeDbs=admin,local --excludeCollections=system.profile  |"
     print '|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|'
-    print '| Like : ./comparison.py --src="localhost:3001" --dest=localhost:3100  --count=1000  --excludeDbs=admin,local,mongoshake --excludeCollections=system.profile --comparisonMode=sample  |'
+    print '| Like : ./comparison.py --src="localhost:3001" --dest=localhost:3100  --excludeDbs=admin,local,mongoshake --excludeCollections=system.profile   |'
     print '|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|'
     exit(0)
 
 if __name__ == "__main__":
-    opts, args = getopt.getopt(sys.argv[1:], "hs:d:n:e:x:", ["help", "src=", "dest=", "count=", "excludeDbs=", "excludeCollections=", "comparisonMode="])
+    opts, args = getopt.getopt(sys.argv[1:], "hs:d:n:e:x:", ["help", "src=", "dest=", "count=", "excludeDbs=", "excludeCollections=","parallel=","checkNum="])
 
-    configure[SAMPLE] = True
+    #configure[SAMPLE] = True
     configure[EXCLUDE_DBS] = []
     configure[EXCLUDE_COLLS] = []
     srcUrl, dstUrl = "", ""
@@ -274,35 +281,40 @@ if __name__ == "__main__":
             srcUrl = value
         if key in ("-d", "--dest"):
             dstUrl = value
-        if key in ("-n", "--count"):
-            configure[COMPARISION_COUNT] = int(value)
         if key in ("-e", "--excludeDbs"):
             configure[EXCLUDE_DBS] = value.split(",")
         if key in ("-x", "--excludeCollections"):
             configure[EXCLUDE_COLLS] = value.split(",")
-        if key in ("--comparisonMode"):
-            print value
-            if value != "all" and value != "no" and value != "sample":
-                log_info("comparisonMode[%r] illegal" % (value))
-                exit(1)
-            configure[COMPARISION_MODE] = value
-    if COMPARISION_MODE not in configure:
-        configure[COMPARISION_MODE] = "sample"
+        if key in ("--parallel"):
+            if int(value) >0:
+                configure[PARALLEL] = int(value)
+            else:
+                configure[PARALLEL] = 16
+        if key in ("--checkNum"):
+            if int(value) >0:
+                configure[CHECK_NUM] = int(value)
+            else:
+                configure[CHECK_NUM] = 1
+    
+    if CHECK_NUM not in configure:
+        configure[CHECK_NUM] = 1
+                
+    if PARALLEL not in configure:
+        configure[PARALLEL] = 16
+
+
 
     # params verify
     if len(srcUrl) == 0 or len(dstUrl) == 0:
         usage()
 
-    # default count is 10000
-    if configure.get(COMPARISION_COUNT) is None or configure.get(COMPARISION_COUNT) <= 0:
-        configure[COMPARISION_COUNT] = 10000
 
     # ignore databases
     configure[EXCLUDE_DBS] += ["admin", "local","_mongodrc_"]
     configure[EXCLUDE_COLLS] += ["system.profile"]
 
     # dump configuration
-    log_info("Configuration [sample=%s, count=%d, excludeDbs=%s, excludeColls=%s]" % (configure[SAMPLE], configure[COMPARISION_COUNT], configure[EXCLUDE_DBS], configure[EXCLUDE_COLLS]))
+    log_info("Configuration [excludeDbs=%s, excludeColls=%s]" % ( configure[EXCLUDE_DBS], configure[EXCLUDE_COLLS]))
 
     try :
         src, dst = MongoCluster(srcUrl), MongoCluster(dstUrl)
@@ -314,19 +326,18 @@ if __name__ == "__main__":
         print e
         log_error("create mongo connection failed %s|%s" % (srcUrl, dstUrl))
         exit()
+    ''' 
+    db = "bonus_log"
+    coll = "packet_log_202003"
+    data_comparison_process(db, coll)   
     '''
-    db = "db1"
-    coll = "data_test"
-    mode = "all"
-    data_comparison_process(db, coll, mode)   
-    '''
+   
     if check(src, dst):
         print "SUCCESS"
         exit(0)
     else:
         print "FAIL"
         exit(-1)
-
 
     src.close()
     dst.close()
